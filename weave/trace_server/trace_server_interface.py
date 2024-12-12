@@ -1,10 +1,10 @@
 import datetime
 from collections.abc import Iterator
 from enum import Enum
-from typing import Any, Literal, Optional, Protocol, Union
+from typing import Annotated, Any, Literal, Optional, Protocol, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
-from typing_extensions import TypedDict
+from typing_extensions import TypeAlias, TypedDict
 
 from weave.trace_server.interface.query import Query
 
@@ -16,6 +16,11 @@ WB_USER_ID_DESCRIPTION = (
 class ExtraKeysTypedDict(TypedDict):
     pass
 
+
+ArbitraryDict: TypeAlias = Annotated[
+    dict[str, Any],
+    Field(json_schema_extra={"additionalProperties": True}),
+]
 
 # https://docs.pydantic.dev/2.8/concepts/strict_mode/#dataclasses-and-typeddict
 ExtraKeysTypedDict.__pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
@@ -49,7 +54,7 @@ class FeedbackDict(TypedDict, total=False):
     id: str
     feedback_type: str
     weave_ref: str
-    payload: dict[str, Any]
+    payload: ArbitraryDict
     creator: Optional[str]
     created_at: Optional[datetime.datetime]
     wb_user_id: Optional[str]
@@ -95,10 +100,10 @@ class CallSchema(BaseModel):
     # Start time is required
     started_at: datetime.datetime
     # Attributes: properties of the call
-    attributes: dict[str, Any]
+    attributes: ArbitraryDict
 
     # Inputs
-    inputs: dict[str, Any]
+    inputs: ArbitraryDict
 
     # End time is required if finished
     ended_at: Optional[datetime.datetime] = None
@@ -119,7 +124,7 @@ class CallSchema(BaseModel):
     deleted_at: Optional[datetime.datetime] = None
 
     @field_serializer("attributes", "summary", when_used="unless-none")
-    def serialize_typed_dicts(self, v: dict[str, Any]) -> dict[str, Any]:
+    def serialize_typed_dicts(self, v: ArbitraryDict) -> dict[str, Any]:
         return dict(v)
 
 
@@ -143,10 +148,10 @@ class StartedCallSchemaForInsert(BaseModel):
     # Start time is required
     started_at: datetime.datetime
     # Attributes: properties of the call
-    attributes: dict[str, Any]
+    attributes: ArbitraryDict
 
     # Inputs
-    inputs: dict[str, Any]
+    inputs: ArbitraryDict
 
     # WB Metadata
     wb_user_id: Optional[str] = Field(None, description=WB_USER_ID_DESCRIPTION)
@@ -170,7 +175,7 @@ class EndedCallSchemaForInsert(BaseModel):
     summary: SummaryInsertMap
 
     @field_serializer("summary")
-    def serialize_typed_dicts(self, v: dict[str, Any]) -> dict[str, Any]:
+    def serialize_typed_dicts(self, v: ArbitraryDict) -> dict[str, Any]:
         return dict(v)
 
 
@@ -278,7 +283,7 @@ class CompletionsCreateReq(BaseModel):
 
 
 class CompletionsCreateRes(BaseModel):
-    response: dict[str, Any]
+    response: ArbitraryDict
     weave_call_id: Optional[str] = None
 
 
@@ -527,7 +532,7 @@ to parse.
 
 
 class TableAppendSpecPayload(BaseModel):
-    row: dict[str, Any]
+    row: ArbitraryDict
 
 
 class TableAppendSpec(BaseModel):
@@ -544,7 +549,7 @@ class TablePopSpec(BaseModel):
 
 class TableInsertSpecPayload(BaseModel):
     index: int
-    row: dict[str, Any]
+    row: ArbitraryDict
 
 
 class TableInsertSpec(BaseModel):
@@ -676,7 +681,7 @@ class FeedbackCreateReq(BaseModel):
     weave_ref: str = Field(examples=["weave:///entity/project/object/name:digest"])
     creator: Optional[str] = Field(default=None, examples=["Jane Smith"])
     feedback_type: str = Field(examples=["custom"])
-    payload: dict[str, Any] = Field(
+    payload: ArbitraryDict = Field(
         examples=[
             {
                 "key": "value",
@@ -708,7 +713,7 @@ class FeedbackCreateRes(BaseModel):
     id: str
     created_at: datetime.datetime
     wb_user_id: str
-    payload: dict[str, Any]  # If not empty, replace payload
+    payload: ArbitraryDict  # If not empty, replace payload
 
 
 class Feedback(FeedbackCreateReq):
