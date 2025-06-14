@@ -1,6 +1,8 @@
 import {Select} from '@wandb/weave/components/Form/Select';
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import {useHistory} from 'react-router-dom';
 
+import {INFERENCE_PATH} from '../../../inference/util';
 import {AddProviderDrawer} from '../../OverviewPage/AddProviderDrawer';
 import {TraceObjSchemaForBaseObjectClass} from '../../wfReactInterface/objectClassQuery';
 import {LLMMaxTokensKey} from '../llmMaxTokens';
@@ -45,6 +47,13 @@ export const LLMDropdown: React.FC<LLMDropdownProps> = ({
   const [isAddProviderDrawerOpen, setIsAddProviderDrawerOpen] = useState(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+
+  // TOOD: Avoid direct url manipulation
+  const history = useHistory();
+  const handleViewCatalog = (path?: string) => {
+    const prefixedPath = path ? `${INFERENCE_PATH}/${path}` : INFERENCE_PATH;
+    history.push(prefixedPath);
+  };
 
   const handleCloseDrawer = () => {
     setIsAddProviderDrawerOpen(false);
@@ -166,6 +175,7 @@ export const LLMDropdown: React.FC<LLMDropdownProps> = ({
               project={project}
               isAdmin={isTeamAdmin}
               onConfigureProvider={handleConfigureProvider}
+              onViewCatalog={handleViewCatalog}
             />
           ),
         }}
