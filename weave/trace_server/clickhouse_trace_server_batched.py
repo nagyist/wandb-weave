@@ -1288,6 +1288,9 @@ class ClickHouseTraceServer(tsi.FullTraceServerInterface):
             # Split out any nested column requests
             columns = [col.split(".")[0] for col in req.columns]
 
+            if req.include_usernames and "wb_user_id" not in columns:
+                columns.append("wb_user_id")
+
             # If we are returning a summary object, make sure that all fields
             # required to compute the summary are in the columns
             if "summary" in columns or req.include_costs:
