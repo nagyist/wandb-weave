@@ -32,17 +32,33 @@ File safety:
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+import os
+import signal
+import sys
 import threading
 from collections.abc import Callable
+from typing import Any
+
+from pydantic import BaseModel
 
 from weave.durability.wal import (
     WALConsumer,
     WALDirectoryManager,
     WALHandlers,
+    WALRecord,
     drain,
 )
+from weave.durability.wal_consumer import JSONLWALConsumer
+from weave.durability.wal_directory_manager import FileWALDirectoryManager
 from weave.durability.wal_lock import is_writer_alive
+from weave.trace_server import trace_server_interface as tsi
+from weave.trace_server_bindings.client_interface import TraceServerClientInterface
+from weave.trace_server_bindings.remote_http_trace_server import (
+    RemoteHTTPTraceServer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +244,7 @@ class BackgroundWALSender:
                     if next(consumer.read_pending(), None) is None:
                         self._consumers.pop(path).close()
                         self._mgr.remove(path)
+                        logger.debug("WAL removed fully-consumed file: %s", path)
                 except Exception:
                     logger.exception("Error draining or cleaning up WAL file %s", path)
 
@@ -271,3 +288,182 @@ class BackgroundWALSender:
             self.drain_once()
         except Exception:
             logger.exception("Error in WAL sender final drain")
+
+
+# Static mapping from WAL record type to its request class.
+# Prefer this over dynamic getattr — type checkers and humans can
+# verify correctness at a glance.
+_RECORD_TYPE_TO_REQ: dict[str, type[BaseModel]] = {
+    "call_start": tsi.CallStartReq,
+    "call_end": tsi.CallEndReq,
+    "obj_create": tsi.ObjCreateReq,
+    "table_create": tsi.TableCreateReq,
+    "file_create": tsi.FileCreateReq,
+}
+
+
+class TraceServerHandlers:
+    """Maps WAL record types to trace server method calls."""
+
+    def __init__(
+        self,
+        server: TraceServerClientInterface,
+        on_success: Callable[[str, WALRecord], None] | None = None,
+    ) -> None:
+        self._server = server
+        self._handlers: WALHandlers = {}
+        for record_type, req_cls in _RECORD_TYPE_TO_REQ.items():
+            method = getattr(server, record_type)
+
+            def _handler(
+                record: WALRecord,
+                _m: Callable = method,
+                _rc: type[BaseModel] = req_cls,
+                _rt: str = record_type,
+            ) -> None:
+                # model_validate_json (not model_validate) so that bytes
+                # fields like FileCreateReq.content are base64-decoded
+                # correctly during the WAL round-trip.
+                _m(_rc.model_validate_json(json.dumps(record["req"])))
+                if on_success is not None:
+                    on_success(_rt, record)
+
+            self._handlers[record_type] = _handler
+
+    def as_dict(self) -> WALHandlers:
+        """Return the handlers as a dict for BackgroundWALSender."""
+        return dict(self._handlers)
+
+
+def build_trace_server_handlers(
+    server: TraceServerClientInterface,
+    on_success: Callable[[str, WALRecord], None] | None = None,
+) -> WALHandlers:
+    """Build WAL handlers that replay records to a trace server.
+
+    Convenience wrapper around :class:`TraceServerHandlers`.
+    """
+    return TraceServerHandlers(server, on_success=on_success).as_dict()
+
+
+def create_sender(
+    wal_dir: str,
+    server: TraceServerClientInterface,
+    *,
+    poll_interval: float = 1.0,
+    on_success: Callable[[str, WALRecord], None] | None = None,
+) -> BackgroundWALSender:
+    """Create a WAL sender that runs in-process as a background thread.
+
+    This is the in-process alternative to ``main()`` (which runs as a
+    standalone process).  Use as a context manager::
+
+        sender = create_sender(wal_dir, server)
+        sender.start()
+        # ... do work ...
+        sender.stop()
+
+    Or::
+
+        with create_sender(wal_dir, server) as sender:
+            ...
+
+    Args:
+        wal_dir: Path to the WAL directory (e.g. ``~/.weave/wal/entity/project``).
+        server: Trace server to replay records to.
+        poll_interval: Seconds between drain cycles.
+        on_success: Optional callback invoked after a record is successfully
+            sent.  Called with ``(record_type, record)``.
+    """
+    dir_mgr = FileWALDirectoryManager(wal_dir)
+    handlers = build_trace_server_handlers(server, on_success=on_success)
+    return BackgroundWALSender(
+        dir_mgr,
+        handlers,
+        JSONLWALConsumer,
+        poll_interval=poll_interval,
+    )
+
+
+# -- CLI entrypoint -------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> None:
+    r"""Run the WAL sender as a standalone process.
+
+    For in-process usage, see :func:`create_sender` instead.
+
+    Usage::
+
+        python -m weave.durability.wal_sender \
+            --entity my-entity --project my-project
+    """
+    parser = argparse.ArgumentParser(
+        description="Drain WAL files and send records to the trace server."
+    )
+    parser.add_argument("--entity", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument(
+        "--wal-dir",
+        help="Override WAL directory (default: ~/.weave/wal/<entity>/<project>)",
+    )
+    parser.add_argument(
+        "--trace-server-url",
+        default=os.environ.get("WF_TRACE_SERVER_URL", "https://trace.wandb.ai"),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("WANDB_API_KEY"),
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.0,
+        help="Seconds between drain cycles (default: 1.0)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.api_key:
+        print("Error: --api-key or WANDB_API_KEY required", file=sys.stderr)
+        sys.exit(1)
+
+    wal_dir = args.wal_dir or os.path.join(
+        os.path.expanduser("~"), ".weave", "wal", args.entity, args.project
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    # RemoteHTTPTraceServer is missing a few abstract methods that the
+    # WAL sender doesn't use.  Suppress via Any intermediate.
+    remote_cls: Any = RemoteHTTPTraceServer
+    server: TraceServerClientInterface = remote_cls(
+        args.trace_server_url, auth=("api", args.api_key)
+    )
+    sender = create_sender(wal_dir, server, poll_interval=args.poll_interval)
+
+    stop = threading.Event()
+
+    def _on_signal(signum: int, frame: object) -> None:
+        logger.debug("Received signal %s, stopping…", signal.Signals(signum).name)
+        stop.set()
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+    logger.debug(
+        "WAL sender started for %s/%s (dir=%s, poll=%.1fs)",
+        args.entity,
+        args.project,
+        wal_dir,
+        args.poll_interval,
+    )
+
+    sender.start()
+    stop.wait()
+    sender.stop()
+
+    logger.debug("WAL sender stopped.")
+
+
+if __name__ == "__main__":
+    main()
