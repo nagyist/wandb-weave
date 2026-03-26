@@ -1417,6 +1417,36 @@ class ClickHouseTraceServer(tsi.FullTraceServerInterface):
             if hasattr(raw_res, "close"):
                 raw_res.close()
 
+    def _calls_query_stream_for_eval_subtree(
+        self, project_id: str, eval_root_ids: list[str]
+    ) -> Iterator[tsi.CallSchema]:
+        """Fetch direct children of eval root IDs and their children in one query."""
+        read_table = self.table_routing_resolver.resolve_read_table(
+            project_id, self.ch_client
+        )
+        columns = sorted(
+            [*REQUIRED_CALL_COLUMNS, *ALL_CALL_JSON_COLUMNS, "parent_id", "ended_at"]
+        )
+        cq = CallsQuery(project_id=project_id, read_table=read_table)
+        for col in columns:
+            cq.add_field(col)
+        cq.eval_root_ids = eval_root_ids
+        cq.add_order("started_at", "asc")
+        cq.add_order("id", "asc")
+        pb = ParamBuilder()
+        raw_res = self._query_stream(cq.as_sql(pb), pb.get_params())
+        select_columns = [c.field for c in cq.select_fields]
+        try:
+            for row in raw_res:
+                yield tsi.CallSchema.model_validate(
+                    _ch_call_dict_to_call_schema_dict(
+                        dict(zip(select_columns, row, strict=True))
+                    )
+                )
+        finally:
+            if hasattr(raw_res, "close"):
+                raw_res.close()
+
     @ddtrace.tracer.wrap(name="clickhouse_trace_server_batched._add_feedback_to_calls")
     def _add_feedback_to_calls(
         self, project_id: str, calls: list[dict[str, Any]]
@@ -5041,7 +5071,16 @@ class ClickHouseTraceServer(tsi.FullTraceServerInterface):
         self, req: tsi.EvalResultsQueryReq
     ) -> tsi.EvalResultsQueryRes:
         """Return grouped prediction/trial/score data for evaluation results."""
-        return eval_helpers.eval_results_query(self, req)
+        eval_root_ids = eval_helpers.resolve_eval_root_ids(req)
+        if not eval_root_ids:
+            empty_summary = tsi.EvalResultsSummaryRes() if req.include_summary else None
+            return tsi.EvalResultsQueryRes(
+                rows=[], total_rows=0, summary=empty_summary, warnings=[]
+            )
+        all_calls = list(
+            self._calls_query_stream_for_eval_subtree(req.project_id, eval_root_ids)
+        )
+        return eval_helpers.eval_results_query(self, req, eval_root_ids, all_calls)
 
     def _obj_read_with_retry(
         self, req: tsi.ObjReadReq, max_retries: int = 10, initial_delay: float = 0.05
