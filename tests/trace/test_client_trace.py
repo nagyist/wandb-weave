@@ -4086,13 +4086,13 @@ async def test_op_sampling_inheritance_async_generator(client):
 
 
 def test_op_sampling_invalid_rates(client):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="tracing_sample_rate must be between 0 and 1"):
 
         @weave.op(tracing_sample_rate=-0.5)
         def negative_rate():
             pass
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="tracing_sample_rate must be between 0 and 1"):
 
         @weave.op(tracing_sample_rate=1.5)
         def too_high_rate():
@@ -4838,7 +4838,7 @@ def test_calls_query_stats_with_limit(client):
     # test filter, should not use special optimization
     assert calls_stats(filter={"trace_ids": [trace_id]}).count == 2
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Limit must be"):
         calls_stats(limit=-1)
 
     # Test that the query works with include_total_storage_size
@@ -5037,7 +5037,7 @@ def test_project_stats_clickhouse(client, clickhouse_client):
     assert res.files_storage_size_bytes == file_size
 
     # test that requesting with none of the include_* params returns an error
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="At least one of"):
         client.server.project_stats(
             tsi.ProjectStatsReq(
                 project_id=project_id,
