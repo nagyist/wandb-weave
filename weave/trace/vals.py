@@ -10,10 +10,7 @@ from pydantic import BaseModel
 
 from weave.trace import box
 from weave.trace.context.tests_context import get_raise_on_captured_errors
-from weave.trace.context.weave_client_context import (
-    get_weave_client,
-    require_weave_client,
-)
+from weave.trace.context.weave_client_context import get_weave_client
 from weave.trace.object_record import ObjectRecord
 from weave.trace.op import is_op, maybe_bind_method
 from weave.trace.refs import (
@@ -425,10 +422,13 @@ class WeaveTable(Traceable):  # noqa: PLW1641
 
         In this case, we don't need to make any calls and can just return the rows
         """
+        # NOTE: wc may be None when the user calls ref.get() without weave.init().
+        # ObjectRef.get() auto-creates a temporary client to fetch the object, then
+        # destroys it — but self.server remains valid. When wc is None we just pass
+        # the row digest as a plain string instead of a Future.
         wc = get_weave_client()
         if (
-            wc is None
-            or self.ref is None
+            self.ref is None
             or self.table_ref is None
             or self.table_ref._row_digests is None
             or self._prefetched_rows is None
@@ -468,8 +468,13 @@ class WeaveTable(Traceable):  # noqa: PLW1641
 
                 return get_row_digest
 
-            next_id_future = wc.future_executor.defer(make_get_row_digest(i))
-            new_ref = self.ref.with_item(next_id_future)
+            if wc is not None:
+                # Use future_executor for parallel digest computation
+                next_id_future = wc.future_executor.defer(make_get_row_digest(i))
+                new_ref = self.ref.with_item(next_id_future)
+            else:
+                # No client — pass digest directly instead of as a Future
+                new_ref = self.ref.with_item(cached_table_ref.row_digests[i])
             val = self._prefetched_rows[i]
             res = from_json(val, self.table_ref.project_id, self.server)
             res = make_trace_obj(res, new_ref, self.server, self.root)
@@ -479,7 +484,9 @@ class WeaveTable(Traceable):  # noqa: PLW1641
         if self.table_ref is None:
             return
 
-        wc = require_weave_client()
+        # NOTE: wc may be None (see comment in _local_iter_with_remote_fallback).
+        # When None, we yield rows directly instead of batching via future_executor.
+        wc = get_weave_client()
 
         page_index = 0
         page_size = REMOTE_ITER_PAGE_SIZE
@@ -517,6 +524,7 @@ class WeaveTable(Traceable):  # noqa: PLW1641
                     self._prefetched_rows = None
 
             # Process rows in parallel using the weave client's future executor
+            # when available, otherwise process synchronously
             futures = []
             for i, item in enumerate(response.rows):
                 new_ref = self.ref.with_item(item.digest) if self.ref else None
@@ -543,16 +551,24 @@ class WeaveTable(Traceable):  # noqa: PLW1641
                         self.root,
                     )
 
-                def make_row_task(v: Any, r: RefWithExtra | None) -> Callable[[], Any]:
-                    def row_task() -> Any:
-                        return process_row(v, r)
+                if wc is not None:
 
-                    return row_task
+                    def make_row_task(
+                        v: Any, r: RefWithExtra | None
+                    ) -> Callable[[], Any]:
+                        def row_task() -> Any:
+                            return process_row(v, r)
 
-                future = wc.future_executor.defer(make_row_task(val, new_ref))
-                futures.append(future)
+                        return row_task
 
-            # Yield results as they complete
+                    future = wc.future_executor.defer(make_row_task(val, new_ref))
+                    futures.append(future)
+                else:
+                    # No client available (e.g. ref.get() without weave.init()),
+                    # process rows synchronously
+                    yield process_row(val, new_ref)
+
+            # Yield results as they complete (only when using future executor)
             for future in futures:
                 yield future.result()
 
