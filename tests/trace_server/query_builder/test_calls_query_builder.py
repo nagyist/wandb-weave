@@ -4152,11 +4152,14 @@ def test_not_eq_none_display_name_calls_complete() -> None:
 
 
 def test_hardcoded_filters_calls_complete() -> None:
-    """Verify thread_ids, turn_ids, parent_ids, wb_run_ids use sentinel null checks on calls_complete."""
+    """Verify hardcoded filters on calls_complete: sentinel null checks and
+    call_ids appears exactly once (in WHERE, not duplicated in filter conditions).
+    """
     cq = CallsQuery(project_id="project", read_table=ReadTable.CALLS_COMPLETE)
     cq.add_field("id")
     cq.hardcoded_filter = HardCodedFilter(
         filter={
+            "call_ids": ["call_aaa"],
             "thread_ids": ["thread_123"],
             "turn_ids": ["turn_456"],
             "parent_ids": ["parent_aaa", "parent_bbb"],
@@ -4167,8 +4170,9 @@ def test_hardcoded_filters_calls_complete() -> None:
         cq,
         """
         SELECT calls_complete.id AS id
-        FROM calls_complete PREWHERE calls_complete.project_id = {pb_13:String}
-        WHERE (calls_complete.wb_run_id IN {pb_9:Array(String)}
+        FROM calls_complete PREWHERE calls_complete.project_id = {pb_14:String}
+        WHERE (calls_complete.id IN {pb_13:Array(String)})
+          AND (calls_complete.wb_run_id IN {pb_9:Array(String)}
                OR calls_complete.wb_run_id = {pb_10:String})
           AND (calls_complete.parent_id IN {pb_11:Array(String)}
                OR calls_complete.parent_id = {pb_12:String})
@@ -4196,7 +4200,8 @@ def test_hardcoded_filters_calls_complete() -> None:
             "pb_10": "",
             "pb_11": ["parent_aaa", "parent_bbb"],
             "pb_12": "",
-            "pb_13": "project",
+            "pb_13": ["call_aaa"],
+            "pb_14": "project",
         },
     )
 
