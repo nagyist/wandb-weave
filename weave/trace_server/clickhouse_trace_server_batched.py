@@ -245,6 +245,7 @@ from weave.trace_server.query_builder.table_query_builder import (
     make_natural_sort_table_query,
     make_standard_table_query,
     make_table_row_digests_query,
+    make_table_rows_read_batch_query,
     make_table_stats_basic_query,
     make_table_stats_query_with_storage_size,
 )
@@ -264,6 +265,7 @@ from weave.trace_server.trace_server_common import (
     hydrate_calls_with_feedback,
     make_feedback_query_req,
     set_nested_key,
+    try_parse_json,
 )
 from weave.trace_server.workers.evaluate_model_worker.evaluate_model_worker import (
     EvaluateModelArgs,
@@ -5151,7 +5153,30 @@ class ClickHouseTraceServer(tsi.FullTraceServerInterface):
                 req.include_predict_and_score_children,
             )
         )
+        if req.resolve_row_refs:
+            reader = lambda digests: self._table_rows_read_batch(
+                req.project_id, digests
+            )
+            eval_helpers.resolve_eval_inputs(all_calls, eval_root_ids, reader)
         return eval_helpers.eval_results_query(self, req, eval_root_ids, all_calls)
+
+    def _table_rows_read_batch(
+        self, project_id: str, digests: list[str]
+    ) -> dict[str, Any]:
+        """Batch read table_rows by digest. Returns {digest: parsed_val}."""
+        if len(digests) == 0:
+            return {}
+
+        pb = ParamBuilder()
+        sql = make_table_rows_read_batch_query(project_id, digests, pb)
+        result = self._query(sql, pb.get_params())
+        out: dict[str, Any] = {}
+        for row in result.result_rows:
+            d, val_dump = row[0], row[1]
+            parsed = try_parse_json(val_dump)
+            if parsed is not None:
+                out[d] = parsed
+        return out
 
     @staticmethod
     def _read_with_retry(
