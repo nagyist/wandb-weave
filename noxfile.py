@@ -57,6 +57,7 @@ SHARDS_WITHOUT_EXTRAS = {
     "autogen_tests",
     "verifiers_test",
     "pandas_test",
+    "scorers",
 }
 
 
@@ -121,6 +122,10 @@ def tests(session: nox.Session, shard: str):
     elif shard in {"trace_server", "trace_server_migrator"}:
         # trace_server shards need both trace_server dependency group and trace_server_tests
         sync_args.extend(["--group", "trace_server", "--group", "trace_server_tests"])
+    elif shard == "scorers":
+        # scorer tests include a few that hit W&B Artifacts directly, so install
+        # both extras to cover the full suite.
+        sync_args.extend(["--extra", "scorers", "--extra", "wandb"])
 
     session.run(*sync_args)
 
@@ -151,6 +156,8 @@ def tests(session: nox.Session, shard: str):
         env["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY", "MISSING")
         env["MISTRAL_API_KEY"] = os.getenv("MISTRAL_API_KEY", "MISSING")
         env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "MISSING")
+        # A few scorer tests download tiny models from W&B Artifacts.
+        env["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY", "MISSING")
 
     if shard == "openai_agents":
         env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "MISSING")
