@@ -156,6 +156,14 @@ class CallSchema(BaseModel):
 
     deleted_at: datetime.datetime | None = None
 
+    expire_at: datetime.datetime | None = Field(
+        default=None,
+        description=(
+            "Expiration timestamp for this call. None = no TTL configured for "
+            "the project (the row will not be expired)."
+        ),
+    )
+
     # Size of metadata storage for this call
     storage_size_bytes: int | None = None
 
@@ -1554,6 +1562,32 @@ class ProjectStatsRes(BaseModel):
     objects_storage_size_bytes: int
     tables_storage_size_bytes: int
     files_storage_size_bytes: int
+
+
+# TTL Settings API
+# ================
+
+
+class ProjectTTLSettingsReadReq(BaseModelStrict):
+    project_id: str
+
+
+class ProjectTTLSettingsReadRes(BaseModel):
+    retention_days: int | None = Field(
+        default=None, description="None = no TTL (infinite retention)"
+    )
+
+
+class ProjectTTLSettingsUpdateReq(BaseModelStrict):
+    project_id: str
+    retention_days: int | None = Field(
+        default=None, description="None disables TTL; must be None or >= 1"
+    )
+    wb_user_id: str | None = None
+
+
+class ProjectTTLSettingsUpdateRes(BaseModel):
+    retention_days: int | None
 
 
 # Annotation Queue API
@@ -2984,6 +3018,15 @@ class TraceServerInterface(Protocol):
 
     # Project statistics API
     def project_stats(self, req: ProjectStatsReq) -> ProjectStatsRes: ...
+
+    # TTL settings API
+    def project_ttl_settings_read(
+        self, req: ProjectTTLSettingsReadReq
+    ) -> ProjectTTLSettingsReadRes: ...
+
+    def project_ttl_settings_update(
+        self, req: ProjectTTLSettingsUpdateReq
+    ) -> ProjectTTLSettingsUpdateRes: ...
 
     # Thread API
     def threads_query_stream(self, req: ThreadsQueryReq) -> Iterator[ThreadSchema]: ...
